@@ -1,0 +1,36 @@
+{
+    "name": "tr-jwe",
+    "version": "1.0.0",
+    "description": "JSON Web Encryption (JWE) encrypt/decrypt for Node.js",
+    "main": "jwe.js",
+    "scripts": {
+        "test": "node ./test/test.js"
+    },
+    "engines": {
+        "node": ">=24.0.0"
+    },
+    "dependencies": {
+        "tr-jwk": "^1.0.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/rinne/node-tr-jwe.git"
+    },
+    "keywords": [
+        "jwe",
+        "encryption",
+        "security",
+        "cryptography",
+        "json"
+    ],
+    "author": {
+        "name": "Timo J. Rinne",
+        "email": "tri@iki.fi",
+        "url": "https://github.com/rinne/"
+    },
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/rinne/node-tr-jwe/issues"
+    },
+    "homepage": "https://github.com/rinne/node-tr-jwe#readme"
+}
