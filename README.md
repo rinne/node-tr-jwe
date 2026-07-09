@@ -7,6 +7,8 @@ is any JSON-serialisable value — object, array, string, number,
 boolean, or `null`. It supports AES key wrap, AES-GCM key wrap, direct
 encryption, RSA-based key transport, and ECDH-ES.
 
+Both a synchronous and a promise-returning asynchronous API are provided.
+
 # Reference
 
 ## Installation
@@ -20,7 +22,7 @@ Node.js `>=24.0.0` is required.
 ## Exports
 
 ```js
-const { encrypt, decrypt, unwrap } = require('tr-jwe');
+const { encrypt, encryptAsync, decrypt, decryptAsync, unwrap, unwrapAsync } = require('tr-jwe');
 ```
 
 ## `encrypt(alg, jwk, data, options)`
@@ -101,6 +103,38 @@ The expected JWK depends on the token:
 Derives or unwraps the content-encryption key from a compact JWE token and returns it as an `oct` JWK.
 
 This is useful when the recipient wants the CEK itself instead of the decrypted payload.
+
+## Asynchronous API
+
+Each function has a promise-returning counterpart taking the same
+arguments and resolving to the same result:
+
+- `encryptAsync(alg, jwk, data, options)`
+- `decryptAsync(token, jwk)`
+- `unwrapAsync(token, jwk)`
+
+Tokens produced by `encrypt` and `encryptAsync` are identical in
+format and can be consumed interchangeably with the synchronous or
+asynchronous functions. Invalid input rejects the returned promise
+instead of throwing synchronously.
+
+The asynchronous variants use the asynchronous `node:crypto` and
+`node:zlib` primitives where such exist (content-encryption key
+generation, random IVs, ephemeral ECDH-ES keys, payload compression
+and decompression); the remaining primitives (AES-GCM, RSA key
+transport, ECDH) have no asynchronous counterparts in `node:crypto`
+and run in-process.
+
+Example:
+
+```js
+const { encryptAsync, decryptAsync } = require('tr-jwe');
+const { cipherKeyGenAsync } = require('tr-jwk');
+
+const key = await cipherKeyGenAsync('A256GCMKW');
+const token = await encryptAsync('A256GCMKW', key, { message: 'secret' });
+const payload = await decryptAsync(token, key);
+```
 
 ## Notes
 

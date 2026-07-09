@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 
 const crypto = require('node:crypto');
 
-const { encrypt, decrypt, unwrap } = require('..');
+const { encrypt, encryptAsync, decrypt, decryptAsync, unwrap, unwrapAsync } = require('..');
 const { cipherKeyGen, ecKeyGen, macKeyGen } = require('tr-jwk');
 
 const payload = { kukkuu: 'reset' };
@@ -222,4 +222,86 @@ function testDir(keyBytes, expectedEnc, compressPayload) {
     assert.throws(() => encrypt('A256GCMKW', k, payload, { extendedReturn: 'yes' }), /Invalid extendedReturn/);
 })();
 
-console.log('JWE tests passed');
+// Asynchronous API. Round-trips every key management mode and checks
+// sync/async interop in both directions.
+async function testAsyncMode(alg, encKey, decKey, compressPayload) {
+    const p = encryptAsync(alg, encKey, payload, { compressPayload });
+    assert.ok(p instanceof Promise);
+    const token = await p;
+    const header = parseHeader(token);
+
+    assert.equal(header.alg, alg);
+    assert.equal(header.zip, expectedZip(compressPayload));
+    assert.deepEqual(await decryptAsync(token, decKey), payload);
+
+    // Sync/async interop in both directions.
+    assert.deepEqual(decrypt(token, decKey), payload);
+    assert.deepEqual(await decryptAsync(encrypt(alg, encKey, payload, { compressPayload }), decKey),
+                     payload);
+
+    const ck = await unwrapAsync(token, decKey);
+    assert.equal(ck.alg, header.enc);
+    assert.deepEqual(await decryptAsync(token, ck), payload);
+    assert.deepEqual(unwrap(token, decKey), ck);
+}
+
+(async () => {
+    for (const compressPayload of [ true, false, 'auto' ]) {
+        for (const alg of [ 'A128GCMKW', 'A192GCMKW', 'A256GCMKW' ]) {
+            const k = cipherKeyGen(alg);
+            await testAsyncMode(alg, k, k, compressPayload);
+        }
+        for (const alg of [ 'A128KW', 'A192KW', 'A256KW' ]) {
+            const keyBytes = { A128KW: 16, A192KW: 24, A256KW: 32 }[alg];
+            const k = { kty: 'oct', alg, k: crypto.randomBytes(keyBytes).toString('base64url') };
+            await testAsyncMode(alg, k, k, compressPayload);
+        }
+        for (const keyBytes of [ 16, 24, 32 ]) {
+            const k = { kty: 'oct', k: crypto.randomBytes(keyBytes).toString('base64url') };
+            await testAsyncMode('dir', k, k, compressPayload);
+        }
+        for (const crv of [ 'P-256', 'P-384', 'P-521' ]) {
+            const k = ecKeyGen(crv);
+            await testAsyncMode('ECDH-ES', k.publicKey, k.secretKey, compressPayload);
+        }
+        for (const alg of [ 'RSA1_5', 'RSA-OAEP', 'RSA-OAEP-256' ]) {
+            const priv = macKeyGen('RS384');
+            await testAsyncMode(alg, toPublicJwk(priv), priv, compressPayload);
+        }
+    }
+
+    // 'auto' must compress asynchronously too when it pays off.
+    {
+        const big = { blob: 'a'.repeat(4096) };
+        const k = cipherKeyGen('A256GCMKW');
+        const token = await encryptAsync('A256GCMKW', k, big, { compressPayload: 'auto' });
+        assert.equal(parseHeader(token).zip, 'DEF');
+        assert.deepEqual(await decryptAsync(token, k), big);
+    }
+
+    // extendedReturn must work asynchronously.
+    {
+        const k = cipherKeyGen('A256GCMKW');
+        const r = await encryptAsync('A256GCMKW', k, payload, { extendedReturn: true });
+        assert.equal(typeof r.token, 'string');
+        assert.equal(r.contentEncryptionKey.kty, 'oct');
+        assert.equal(r.contentEncryptionKey.alg, parseHeader(r.token).enc);
+        assert.deepEqual(await decryptAsync(r.token, r.contentEncryptionKey), payload);
+    }
+
+    // Bad input must reject (not throw synchronously).
+    {
+        const k = cipherKeyGen('A256GCMKW');
+        await assert.rejects(encryptAsync('A256GCMKW', k, payload, 'nope'), /Invalid options/);
+        await assert.rejects(encryptAsync('A256GCMKW', k, payload, { unknown: 1 }), /Unknown option/);
+        await assert.rejects(encryptAsync('A256GCMKW', k, payload, { compressPayload: 'sometimes' }), /Invalid compressPayload/);
+        await assert.rejects(encryptAsync('A256GCMKW', k, payload, { extendedReturn: 'yes' }), /Invalid extendedReturn/);
+        await assert.rejects(decryptAsync('not-a-token', k), /Invalid JWE token/);
+        await assert.rejects(unwrapAsync('not-a-token', k), /Invalid JWE token/);
+    }
+
+    console.log('JWE tests passed');
+})().catch((e) => {
+    console.error(e);
+    process.exit(1);
+});

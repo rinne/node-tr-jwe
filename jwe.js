@@ -2,8 +2,14 @@
 
 const crypto = require('node:crypto');
 const zlib = require("node:zlib");
-            
-const { cipherKeyGen } = require('tr-jwk');
+const { promisify } = require('node:util');
+
+const { cipherKeyGen, cipherKeyGenAsync } = require('tr-jwk');
+
+const randomBytes = promisify(crypto.randomBytes);
+const generateKeyPair = promisify(crypto.generateKeyPair);
+const deflateRaw = promisify(zlib.deflateRaw);
+const inflateRaw = promisify(zlib.inflateRaw);
 
 const kwAlgOpts = {
     A128GCMKW: { keyLength: 128, nodeJsCipherId: 'aes-128-gcm', enc: 'A128GCM' },
@@ -38,6 +44,100 @@ const ecdhCurveOpts = {
 };
 
 function encrypt(alg, jwk, data, options) {
+    const p = _encryptPrelude(alg, jwk, options);
+    var headerData = { alg, enc: p.enc }, contentKey, encryptedContentKey;
+    switch (p.mode) {
+    case 'kw':
+        contentKey = Buffer.from(cipherKeyGen(p.enc).k, 'base64url');
+        encryptedContentKey = _kwWrapCek(alg, jwk, p.keyBytes, contentKey,
+                                         crypto.randomBytes(12), headerData);
+        break;
+    case 'skw':
+        contentKey = Buffer.from(cipherKeyGen(p.enc).k, 'base64url');
+        encryptedContentKey = _skwWrapCek(alg, jwk, p.keyBytes, contentKey);
+        break;
+    case 'rsa':
+        contentKey = Buffer.from(cipherKeyGen(p.enc).k, 'base64url');
+        encryptedContentKey = _rsaWrapCek(alg, jwk, contentKey);
+        break;
+    case 'dir':
+        contentKey = Buffer.from(jwk.k, 'base64url');
+        encryptedContentKey = Buffer.alloc(0);
+        break;
+    case 'ecdh':
+        contentKey = _ecdhCek(p.enc, p.keyBits, p.keyBytes, jwk,
+                              crypto.generateKeyPairSync('ec', { namedCurve: jwk.crv }),
+                              headerData);
+        encryptedContentKey = Buffer.alloc(0);
+        break;
+    default:
+        throw new Error('Internal error');
+    }
+    _headerKid(headerData, jwk);
+    const rawPlaintext = _rawPlaintext(data);
+    var plaintext = rawPlaintext;
+    if (p.compressOpt === true) {
+        plaintext = zlib.deflateRawSync(rawPlaintext);
+        headerData.zip = 'DEF';
+    } else if (p.compressOpt === 'auto') {
+        const deflated = zlib.deflateRawSync(rawPlaintext);
+        if (deflated.length < rawPlaintext.length) {
+            plaintext = deflated;
+            headerData.zip = 'DEF';
+        }
+    }
+    return _encryptFinish(headerData, contentKey, encryptedContentKey,
+                          plaintext, crypto.randomBytes(12), p.extendedReturn);
+}
+
+async function encryptAsync(alg, jwk, data, options) {
+    const p = _encryptPrelude(alg, jwk, options);
+    var headerData = { alg, enc: p.enc }, contentKey, encryptedContentKey;
+    switch (p.mode) {
+    case 'kw':
+        contentKey = Buffer.from((await cipherKeyGenAsync(p.enc)).k, 'base64url');
+        encryptedContentKey = _kwWrapCek(alg, jwk, p.keyBytes, contentKey,
+                                         await randomBytes(12), headerData);
+        break;
+    case 'skw':
+        contentKey = Buffer.from((await cipherKeyGenAsync(p.enc)).k, 'base64url');
+        encryptedContentKey = _skwWrapCek(alg, jwk, p.keyBytes, contentKey);
+        break;
+    case 'rsa':
+        contentKey = Buffer.from((await cipherKeyGenAsync(p.enc)).k, 'base64url');
+        encryptedContentKey = _rsaWrapCek(alg, jwk, contentKey);
+        break;
+    case 'dir':
+        contentKey = Buffer.from(jwk.k, 'base64url');
+        encryptedContentKey = Buffer.alloc(0);
+        break;
+    case 'ecdh':
+        contentKey = _ecdhCek(p.enc, p.keyBits, p.keyBytes, jwk,
+                              await generateKeyPair('ec', { namedCurve: jwk.crv }),
+                              headerData);
+        encryptedContentKey = Buffer.alloc(0);
+        break;
+    default:
+        throw new Error('Internal error');
+    }
+    _headerKid(headerData, jwk);
+    const rawPlaintext = _rawPlaintext(data);
+    var plaintext = rawPlaintext;
+    if (p.compressOpt === true) {
+        plaintext = await deflateRaw(rawPlaintext);
+        headerData.zip = 'DEF';
+    } else if (p.compressOpt === 'auto') {
+        const deflated = await deflateRaw(rawPlaintext);
+        if (deflated.length < rawPlaintext.length) {
+            plaintext = deflated;
+            headerData.zip = 'DEF';
+        }
+    }
+    return _encryptFinish(headerData, contentKey, encryptedContentKey,
+                          plaintext, await randomBytes(12), p.extendedReturn);
+}
+
+function _encryptPrelude(alg, jwk, options) {
     if (options === undefined || options === null) {
         options = {};
     }
@@ -67,7 +167,7 @@ function encrypt(alg, jwk, data, options) {
         }
         mode = 'kw';
         enc = kwAlgOpts[alg]?.enc;
-        keyBits = kwAlgOpts[alg]?.keyLength ?? 0; 
+        keyBits = kwAlgOpts[alg]?.keyLength ?? 0;
         keyBytes = Math.ceil(keyBits / 8);
     } else if (simpleKwAlgOpts[alg]) {
         if (! (jwk && (jwk?.kty === 'oct') && (/^[0-9a-zA-Z_-]{22,43}$/.test(jwk.k)))) {
@@ -113,81 +213,68 @@ function encrypt(alg, jwk, data, options) {
     if (! (keyBits && keyBytes)) {
         throw new Error('Invalid encryption algorithm');
     }
-    var headerData = { alg, enc }, contentKey, encryptedContentKey;
-    switch (mode) {
-    case 'kw':
-        {
-            if (! [ null, undefined, alg ].includes(jwk.alg)) {
-                throw new Error('Invalid JWK key algorithm');
-            }
-            const kwKey = Buffer.from(jwk.k, 'base64url');
-            if (kwKey.length != keyBytes) {
-                throw new Error('Invalid JWK key length');
-            }
-            contentKey = Buffer.from(cipherKeyGen(kwAlgOpts[alg].enc).k, 'base64url');
-            const kwIv = crypto.randomBytes(12);
-            const kwCipher = crypto.createCipheriv(kwAlgOpts[alg].nodeJsCipherId, kwKey, kwIv);
-            encryptedContentKey = Buffer.concat([kwCipher.update(contentKey), kwCipher.final()]);
-            const kwTag = kwCipher.getAuthTag();
-            Object.assign(headerData, { alg,
-                                        iv: kwIv.toString('base64url'),
-                                        tag: kwTag.toString('base64url') });
-        }
-        break;
-    case 'skw':
-        {
-            if (! [ null, undefined, alg ].includes(jwk.alg)) {
-                throw new Error('Invalid JWK key algorithm');
-            }
-            const skwKey = Buffer.from(jwk.k, 'base64url');
-            if (skwKey.length != keyBytes) {
-                throw new Error('Invalid JWK key length');
-            }
-            contentKey = Buffer.from(cipherKeyGen(simpleKwAlgOpts[alg].enc).k, 'base64url');
-            const skwCipher = crypto.createCipheriv(simpleKwAlgOpts[alg].nodeJsCipherId, skwKey, AES_KW_IV);
-            encryptedContentKey = Buffer.concat([skwCipher.update(contentKey), skwCipher.final()]);
-        }
-        break;
-    case 'rsa':
-        {
-            contentKey = Buffer.from(cipherKeyGen(enc).k, 'base64url');
-            const rsaOpts = rsaAlgOpts[alg];
-            const rsaPubKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-            encryptedContentKey = crypto.publicEncrypt({ key: rsaPubKey, ...rsaOpts }, contentKey);
-        }
-        break;
-    case 'dir':
-        {
-            contentKey = Buffer.from(jwk.k, 'base64url');
-            encryptedContentKey = Buffer.alloc(0);
-        }
-        break;
-    case 'ecdh':
-        {
-            const recipientKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-            const ephemeralKeys = crypto.generateKeyPairSync('ec', { namedCurve: jwk.crv });
-            const sharedSecret = crypto.diffieHellman({ privateKey: ephemeralKeys.privateKey,
-                                                        publicKey: recipientKey });
-            const epk = ephemeralKeys.publicKey.export({ format: 'jwk' });
-            const otherInfo = _ecdhOtherInfo(enc, keyBits);
-            contentKey = crypto.createHash('sha256')
-                .update(_uint32be(1))
-                .update(sharedSecret)
-                .update(otherInfo)
-                .digest()
-                .subarray(0, keyBytes);
-            encryptedContentKey = Buffer.alloc(0);
-            Object.assign(headerData, { epk });
-        }
-        break;
-    default:
-        throw new Error('Internal error');
+    return { compressOpt, extendedReturn, mode, enc, keyBits, keyBytes };
+}
+
+function _kwWrapCek(alg, jwk, keyBytes, contentKey, kwIv, headerData) {
+    if (! [ null, undefined, alg ].includes(jwk.alg)) {
+        throw new Error('Invalid JWK key algorithm');
     }
+    const kwKey = Buffer.from(jwk.k, 'base64url');
+    if (kwKey.length != keyBytes) {
+        throw new Error('Invalid JWK key length');
+    }
+    const kwCipher = crypto.createCipheriv(kwAlgOpts[alg].nodeJsCipherId, kwKey, kwIv);
+    const encryptedContentKey = Buffer.concat([kwCipher.update(contentKey), kwCipher.final()]);
+    const kwTag = kwCipher.getAuthTag();
+    Object.assign(headerData, { iv: kwIv.toString('base64url'),
+                                tag: kwTag.toString('base64url') });
+    return encryptedContentKey;
+}
+
+function _skwWrapCek(alg, jwk, keyBytes, contentKey) {
+    if (! [ null, undefined, alg ].includes(jwk.alg)) {
+        throw new Error('Invalid JWK key algorithm');
+    }
+    const skwKey = Buffer.from(jwk.k, 'base64url');
+    if (skwKey.length != keyBytes) {
+        throw new Error('Invalid JWK key length');
+    }
+    const skwCipher = crypto.createCipheriv(simpleKwAlgOpts[alg].nodeJsCipherId, skwKey, AES_KW_IV);
+    return Buffer.concat([skwCipher.update(contentKey), skwCipher.final()]);
+}
+
+function _rsaWrapCek(alg, jwk, contentKey) {
+    const rsaOpts = rsaAlgOpts[alg];
+    const rsaPubKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    return crypto.publicEncrypt({ key: rsaPubKey, ...rsaOpts }, contentKey);
+}
+
+function _ecdhCek(enc, keyBits, keyBytes, jwk, ephemeralKeys, headerData) {
+    const recipientKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    const sharedSecret = crypto.diffieHellman({ privateKey: ephemeralKeys.privateKey,
+                                                publicKey: recipientKey });
+    const epk = ephemeralKeys.publicKey.export({ format: 'jwk' });
+    const otherInfo = _ecdhOtherInfo(enc, keyBits);
+    const contentKey = crypto.createHash('sha256')
+        .update(_uint32be(1))
+        .update(sharedSecret)
+        .update(otherInfo)
+        .digest()
+        .subarray(0, keyBytes);
+    Object.assign(headerData, { epk });
+    return contentKey;
+}
+
+function _headerKid(headerData, jwk) {
     if (jwk.kid && (typeof(jwk.kid) === 'string')) {
         headerData.kid = jwk.kid;
     } else if (! [ null, undefined, '' ].includes(jwk.kid)) {
         throw new Error('Invalid JWK key identifier');
     }
+}
+
+function _rawPlaintext(data) {
     // RFC 7516 places no restriction on the plaintext content; tr-jwe carries
     // any JSON-serialisable value (object, array, string, number, boolean,
     // or null). JSON.stringify(undefined) yields `undefined`, which is not a
@@ -196,20 +283,11 @@ function encrypt(alg, jwk, data, options) {
     if (typeof rawJson !== 'string') {
         throw new Error('Invalid input data');
     }
-    const rawPlaintext = Buffer.from(rawJson);
-    var plaintext = rawPlaintext;
-    if (compressOpt === true) {
-        plaintext = zlib.deflateRawSync(rawPlaintext);
-        headerData.zip = 'DEF';
-    } else if (compressOpt === 'auto') {
-        const deflated = zlib.deflateRawSync(rawPlaintext);
-        if (deflated.length < rawPlaintext.length) {
-            plaintext = deflated;
-            headerData.zip = 'DEF';
-        }
-    }
+    return Buffer.from(rawJson);
+}
+
+function _encryptFinish(headerData, contentKey, encryptedContentKey, plaintext, iv, extendedReturn) {
     const header = Buffer.from(JSON.stringify(headerData)).toString('base64url');
-    const iv =  crypto.randomBytes(12);
     const cipher = (crypto
                     .createCipheriv(encAlgOpts[headerData.enc].nodeJsCipherId, contentKey, iv)
                     .setAAD(Buffer.from(header, 'ascii')));
@@ -275,44 +353,7 @@ function decrypt(token, jwk) {
     }
     var plaintext;
     try {
-        let key;
-        if ((kwAlgOpts[t.headerData?.alg] &&
-             encAlgOpts[t.headerData?.enc] &&
-             [ null, undefined, 'DEF' ].includes(t.headerData?.zip) &&
-             /^[0-9a-zA-Z_-]{2,}$/.test(t.headerData?.iv) &&
-             /^[0-9a-zA-Z_-]{2,}$/.test(t.headerData?.tag))) {
-            key = _dec(t.key,
-                       jwk,
-                       Buffer.from(t.headerData.iv, 'base64url'),
-                       Buffer.from(t.headerData.tag, 'base64url'));
-        } else if ((simpleKwAlgOpts[t.headerData?.alg] &&
-                    encAlgOpts[t.headerData?.enc] &&
-                    (t.key.length > 0))) {
-            key = _simpleKwUnwrap(t.key, t.headerData.alg, jwk);
-        } else if ((rsaAlgOpts[t.headerData?.alg] &&
-                    encAlgOpts[t.headerData?.enc] &&
-                    (t.key.length > 0))) {
-            key = _rsaUnwrap(t.key, t.headerData.alg, jwk);
-        } else if ((t.headerData?.alg === 'dir') &&
-                   encAlgOpts[t.headerData?.enc] &&
-                   (t.key.length === 0)) {
-            if (! (jwk && (jwk?.kty === 'oct') && (/^[0-9a-zA-Z_-]{22,43}$/.test(jwk.k)))) {
-                throw new Error('Invalid JWK key for direct decryption');
-            }
-            const dirKey = Buffer.from(jwk.k, 'base64url');
-            if (dirKey.length * 8 !== encAlgOpts[t.headerData.enc].keyLength) {
-                throw new Error('Key length does not match enc algorithm');
-            }
-            key = dirKey;
-        } else if ((t.headerData?.alg === 'ECDH-ES') &&
-                   encAlgOpts[t.headerData?.enc] &&
-                   (t.key.length === 0) &&
-                   (t.headerData?.epk?.kty === 'EC') &&
-                   ecdhCurveOpts[t.headerData?.epk?.crv]) {
-            key = _ecdhKey(t.headerData.enc, t.headerData.epk, jwk, t.headerData.apu, t.headerData.apv);
-        } else {
-            throw new Error('Invalid token encryption');
-        }
+        const key = _recoverCek(t, jwk);
         plaintext = _dec(t.ciphertext,
                          { kty: 'oct',
                            alg: t.headerData.enc,
@@ -320,12 +361,8 @@ function decrypt(token, jwk) {
                          t.iv,
                          t.tag,
                          t.header);
-        switch (t.headerData.zip) {
-        case 'DEF':
+        if (t.headerData.zip === 'DEF') {
             plaintext = zlib.inflateRawSync(plaintext);
-            break;
-        default:
-            /*NOTHING*/
         }
     } catch (_) {
         plaintext = undefined;
@@ -333,16 +370,52 @@ function decrypt(token, jwk) {
     if (! plaintext) {
         // Just try if the submitted key happens to be content key instead.
         try {
-            if (! [ null, undefined, 'DEF' ].includes(t.headerData?.zip)) {
-                throw new Error('Invalid token encryption');
-            }
             plaintext = _dec(t.ciphertext, jwk, t.iv, t.tag, t.header);
-            switch (t.headerData.zip) {
-            case 'DEF':
+            if (t.headerData.zip === 'DEF') {
                 plaintext = zlib.inflateRawSync(plaintext);
-                break;
-            default:
-                /*NOTHING*/
+            }
+        } catch (_) {
+            plaintext = undefined;
+        }
+    }
+    if (! plaintext) {
+        throw new Error('Unable to decrypt JWE token');
+    }
+    var payload = _jsonBufToObj(plaintext);
+    return payload;
+}
+
+async function decryptAsync(token, jwk) {
+    const t = parse(token);
+    const enc = t.headerData?.enc;
+    if (! encAlgOpts[enc]) {
+        throw new Error('Invalid encryption algorithm');
+    }
+    if (! [ null, undefined, 'DEF' ].includes(t.headerData?.zip)) {
+        throw new Error('Invalid payload compression');
+    }
+    var plaintext;
+    try {
+        const key = _recoverCek(t, jwk);
+        plaintext = _dec(t.ciphertext,
+                         { kty: 'oct',
+                           alg: t.headerData.enc,
+                           k: key.toString('base64url') },
+                         t.iv,
+                         t.tag,
+                         t.header);
+        if (t.headerData.zip === 'DEF') {
+            plaintext = await inflateRaw(plaintext);
+        }
+    } catch (_) {
+        plaintext = undefined;
+    }
+    if (! plaintext) {
+        // Just try if the submitted key happens to be content key instead.
+        try {
+            plaintext = _dec(t.ciphertext, jwk, t.iv, t.tag, t.header);
+            if (t.headerData.zip === 'DEF') {
+                plaintext = await inflateRaw(plaintext);
             }
         } catch (_) {
             plaintext = undefined;
@@ -362,43 +435,7 @@ function unwrap(token, jwk) {
         throw new Error('Invalid token encryption');
     }
     try {
-        let key;
-        if ((kwAlgOpts[t.headerData?.alg] &&
-             encAlgOpts[t.headerData?.enc] &&
-             /^[0-9a-zA-Z_-]{2,}$/.test(t.headerData?.iv) &&
-             /^[0-9a-zA-Z_-]{2,}$/.test(t.headerData?.tag))) {
-            key = _dec(t.key,
-                       jwk,
-                       Buffer.from(t.headerData.iv, 'base64url'),
-                       Buffer.from(t.headerData.tag, 'base64url'));
-        } else if ((simpleKwAlgOpts[t.headerData?.alg] &&
-                    encAlgOpts[t.headerData?.enc] &&
-                    (t.key.length > 0))) {
-            key = _simpleKwUnwrap(t.key, t.headerData.alg, jwk);
-        } else if ((rsaAlgOpts[t.headerData?.alg] &&
-                    encAlgOpts[t.headerData?.enc] &&
-                    (t.key.length > 0))) {
-            key = _rsaUnwrap(t.key, t.headerData.alg, jwk);
-        } else if ((t.headerData?.alg === 'dir') &&
-                   encAlgOpts[t.headerData?.enc] &&
-                   (t.key.length === 0)) {
-            if (! (jwk && (jwk?.kty === 'oct') && (/^[0-9a-zA-Z_-]{22,43}$/.test(jwk.k)))) {
-                throw new Error('Invalid JWK key for direct decryption');
-            }
-            const dirKey = Buffer.from(jwk.k, 'base64url');
-            if (dirKey.length * 8 !== encAlgOpts[t.headerData.enc].keyLength) {
-                throw new Error('Key length does not match enc algorithm');
-            }
-            key = dirKey;
-        } else if ((t.headerData?.alg === 'ECDH-ES') &&
-                   encAlgOpts[t.headerData?.enc] &&
-                   (t.key.length === 0) &&
-                   (t.headerData?.epk?.kty === 'EC') &&
-                   ecdhCurveOpts[t.headerData?.epk?.crv]) {
-            key = _ecdhKey(t.headerData.enc, t.headerData.epk, jwk, t.headerData.apu, t.headerData.apv);
-        } else {
-            throw new Error('Invalid token encryption');
-        }
+        const key = _recoverCek(t, jwk);
         const wrappedJwk = { kty: 'oct',
                              alg: t.headerData.enc,
                              k: key.toString('base64url'),
@@ -407,6 +444,50 @@ function unwrap(token, jwk) {
     } catch (_) {
         throw new Error('Unable to unwrap JWE wrapped key');
     }
+}
+
+async function unwrapAsync(token, jwk) {
+    // Key unwrap has no asynchronous node:crypto counterparts; this is a
+    // promise-returning wrapper provided for API symmetry.
+    return unwrap(token, jwk);
+}
+
+function _recoverCek(t, jwk) {
+    if ((kwAlgOpts[t.headerData?.alg] &&
+         encAlgOpts[t.headerData?.enc] &&
+         /^[0-9a-zA-Z_-]{2,}$/.test(t.headerData?.iv) &&
+         /^[0-9a-zA-Z_-]{2,}$/.test(t.headerData?.tag))) {
+        return _dec(t.key,
+                    jwk,
+                    Buffer.from(t.headerData.iv, 'base64url'),
+                    Buffer.from(t.headerData.tag, 'base64url'));
+    } else if ((simpleKwAlgOpts[t.headerData?.alg] &&
+                encAlgOpts[t.headerData?.enc] &&
+                (t.key.length > 0))) {
+        return _simpleKwUnwrap(t.key, t.headerData.alg, jwk);
+    } else if ((rsaAlgOpts[t.headerData?.alg] &&
+                encAlgOpts[t.headerData?.enc] &&
+                (t.key.length > 0))) {
+        return _rsaUnwrap(t.key, t.headerData.alg, jwk);
+    } else if ((t.headerData?.alg === 'dir') &&
+               encAlgOpts[t.headerData?.enc] &&
+               (t.key.length === 0)) {
+        if (! (jwk && (jwk?.kty === 'oct') && (/^[0-9a-zA-Z_-]{22,43}$/.test(jwk.k)))) {
+            throw new Error('Invalid JWK key for direct decryption');
+        }
+        const dirKey = Buffer.from(jwk.k, 'base64url');
+        if (dirKey.length * 8 !== encAlgOpts[t.headerData.enc].keyLength) {
+            throw new Error('Key length does not match enc algorithm');
+        }
+        return dirKey;
+    } else if ((t.headerData?.alg === 'ECDH-ES') &&
+               encAlgOpts[t.headerData?.enc] &&
+               (t.key.length === 0) &&
+               (t.headerData?.epk?.kty === 'EC') &&
+               ecdhCurveOpts[t.headerData?.epk?.crv]) {
+        return _ecdhKey(t.headerData.enc, t.headerData.epk, jwk, t.headerData.apu, t.headerData.apv);
+    }
+    throw new Error('Invalid token encryption');
 }
 
 function _dec(ciphertext, jwk, iv, tag, aad) {
@@ -513,4 +594,4 @@ function _uint32be(n) {
     return r;
 }
 
-module.exports = { encrypt, decrypt, unwrap };
+module.exports = { encrypt, encryptAsync, decrypt, decryptAsync, unwrap, unwrapAsync };
