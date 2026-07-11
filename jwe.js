@@ -5,9 +5,12 @@ const zlib = require("node:zlib");
 const { promisify } = require('node:util');
 
 const { cipherKeyGen, cipherKeyGenAsync } = require('tr-jwk');
+const { kmac256 } = require('tr-kmac');
 
 const randomBytes = promisify(crypto.randomBytes);
 const generateKeyPair = promisify(crypto.generateKeyPair);
+const encapsulate = promisify(crypto.encapsulate);
+const decapsulate = promisify(crypto.decapsulate);
 const deflateRaw = promisify(zlib.deflateRaw);
 const inflateRaw = promisify(zlib.inflateRaw);
 
@@ -43,6 +46,16 @@ const ecdhCurveOpts = {
     'P-521': { enc: 'A256GCM' }
 };
 
+// ML-KEM direct key encapsulation following draft-ietf-jose-pqc-kem-05.
+// The algorithm identifiers carry a collision-resistant suffix (RFC 7515
+// section 4.1.1) because the draft is not final; the construction is frozen
+// at draft-05 semantics for these names regardless of later draft changes.
+const mlKemAlgOpts = {
+    'ML-KEM-512@spinium.com': { jwkAlg: 'ML-KEM-512', ctLength: 768, enc: 'A256GCM' },
+    'ML-KEM-768@spinium.com': { jwkAlg: 'ML-KEM-768', ctLength: 1088, enc: 'A256GCM' },
+    'ML-KEM-1024@spinium.com': { jwkAlg: 'ML-KEM-1024', ctLength: 1568, enc: 'A256GCM' }
+};
+
 function encrypt(alg, jwk, data, options) {
     const p = _encryptPrelude(alg, jwk, options);
     var headerData = { alg, enc: p.enc }, contentKey, encryptedContentKey;
@@ -68,6 +81,12 @@ function encrypt(alg, jwk, data, options) {
         contentKey = _ecdhCek(p.enc, p.keyBits, p.keyBytes, jwk,
                               crypto.generateKeyPairSync('ec', { namedCurve: jwk.crv }),
                               headerData);
+        encryptedContentKey = Buffer.alloc(0);
+        break;
+    case 'mlkem':
+        contentKey = _mlKemCek(alg, p.keyBits, p.keyBytes,
+                               crypto.encapsulate(crypto.createPublicKey({ key: jwk, format: 'jwk' })),
+                               headerData);
         encryptedContentKey = Buffer.alloc(0);
         break;
     default:
@@ -115,6 +134,12 @@ async function encryptAsync(alg, jwk, data, options) {
         contentKey = _ecdhCek(p.enc, p.keyBits, p.keyBytes, jwk,
                               await generateKeyPair('ec', { namedCurve: jwk.crv }),
                               headerData);
+        encryptedContentKey = Buffer.alloc(0);
+        break;
+    case 'mlkem':
+        contentKey = _mlKemCek(alg, p.keyBits, p.keyBytes,
+                               await encapsulate(crypto.createPublicKey({ key: jwk, format: 'jwk' })),
+                               headerData);
         encryptedContentKey = Buffer.alloc(0);
         break;
     default:
@@ -209,6 +234,14 @@ function _encryptPrelude(alg, jwk, options) {
         enc = ecdhCurveOpts[jwk?.crv].enc;
         keyBits = encAlgOpts[enc]?.keyLength ?? 0;
         keyBytes = Math.ceil(keyBits / 8);
+    } else if (mlKemAlgOpts[alg]) {
+        if (! (jwk && (jwk?.kty === 'AKP') && (jwk?.alg === mlKemAlgOpts[alg].jwkAlg))) {
+            throw new Error('Invalid JWK key for ML-KEM');
+        }
+        mode = 'mlkem';
+        enc = mlKemAlgOpts[alg].enc;
+        keyBits = encAlgOpts[enc]?.keyLength ?? 0;
+        keyBytes = Math.ceil(keyBits / 8);
     }
     if (! (keyBits && keyBytes)) {
         throw new Error('Invalid encryption algorithm');
@@ -264,6 +297,46 @@ function _ecdhCek(enc, keyBits, keyBytes, jwk, ephemeralKeys, headerData) {
         .subarray(0, keyBytes);
     Object.assign(headerData, { epk });
     return contentKey;
+}
+
+function _mlKemCek(alg, keyBits, keyBytes, encapsulation, headerData) {
+    Object.assign(headerData, { ek: encapsulation.ciphertext.toString('base64url') });
+    return _mlKemKdf(alg, keyBits, keyBytes, encapsulation.sharedKey);
+}
+
+function _mlKemKdf(alg, keyBits, keyBytes, sharedKey) {
+    // draft-ietf-jose-pqc-kem-05: CEK = KMAC256(SS, AlgorithmID || SuppPubInfo,
+    // keydatalen, "") with AlgorithmID (the literal "alg" value) and SuppPubInfo
+    // encoded as in RFC 7518 section 4.6.2.
+    const algBytes = Buffer.from(alg, 'ascii');
+    return kmac256(sharedKey,
+                   Buffer.concat([ _uint32be(algBytes.length), algBytes, _uint32be(keyBits) ]),
+                   keyBytes);
+}
+
+function _isMlKem(t) {
+    return !! (mlKemAlgOpts[t.headerData?.alg] &&
+               encAlgOpts[t.headerData?.enc] &&
+               (t.key.length === 0) &&
+               (typeof t.headerData?.ek === 'string') &&
+               /^[0-9a-zA-Z_-]+$/.test(t.headerData.ek));
+}
+
+function _mlKemPrep(t, jwk) {
+    const alg = t.headerData.alg;
+    if (! (jwk && (jwk?.kty === 'AKP') && (jwk?.alg === mlKemAlgOpts[alg].jwkAlg))) {
+        throw new Error('Invalid JWK key for ML-KEM');
+    }
+    const ct = Buffer.from(t.headerData.ek, 'base64url');
+    if (ct.length !== mlKemAlgOpts[alg].ctLength) {
+        throw new Error('Invalid ML-KEM ciphertext');
+    }
+    const keyBits = encAlgOpts[t.headerData.enc].keyLength;
+    return { alg,
+             privateKey: crypto.createPrivateKey({ key: jwk, format: 'jwk' }),
+             ct,
+             keyBits,
+             keyBytes: Math.ceil(keyBits / 8) };
 }
 
 function _headerKid(headerData, jwk) {
@@ -396,7 +469,7 @@ async function decryptAsync(token, jwk) {
     }
     var plaintext;
     try {
-        const key = _recoverCek(t, jwk);
+        const key = await _recoverCekAsync(t, jwk);
         plaintext = _dec(t.ciphertext,
                          { kty: 'oct',
                            alg: t.headerData.enc,
@@ -447,9 +520,21 @@ function unwrap(token, jwk) {
 }
 
 async function unwrapAsync(token, jwk) {
-    // Key unwrap has no asynchronous node:crypto counterparts; this is a
-    // promise-returning wrapper provided for API symmetry.
-    return unwrap(token, jwk);
+    const t = parse(token);
+    const enc = t.headerData?.enc;
+    if (! encAlgOpts[enc]) {
+        throw new Error('Invalid token encryption');
+    }
+    try {
+        const key = await _recoverCekAsync(t, jwk);
+        const wrappedJwk = { kty: 'oct',
+                             alg: t.headerData.enc,
+                             k: key.toString('base64url'),
+                             key_ops: [ 'encrypt', 'decrypt' ] };
+        return wrappedJwk;
+    } catch (_) {
+        throw new Error('Unable to unwrap JWE wrapped key');
+    }
 }
 
 function _recoverCek(t, jwk) {
@@ -486,8 +571,19 @@ function _recoverCek(t, jwk) {
                (t.headerData?.epk?.kty === 'EC') &&
                ecdhCurveOpts[t.headerData?.epk?.crv]) {
         return _ecdhKey(t.headerData.enc, t.headerData.epk, jwk, t.headerData.apu, t.headerData.apv);
+    } else if (_isMlKem(t)) {
+        const m = _mlKemPrep(t, jwk);
+        return _mlKemKdf(m.alg, m.keyBits, m.keyBytes, crypto.decapsulate(m.privateKey, m.ct));
     }
     throw new Error('Invalid token encryption');
+}
+
+async function _recoverCekAsync(t, jwk) {
+    if (_isMlKem(t)) {
+        const m = _mlKemPrep(t, jwk);
+        return _mlKemKdf(m.alg, m.keyBits, m.keyBytes, await decapsulate(m.privateKey, m.ct));
+    }
+    return _recoverCek(t, jwk);
 }
 
 function _dec(ciphertext, jwk, iv, tag, aad) {

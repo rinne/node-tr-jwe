@@ -7,7 +7,8 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
 const { encrypt, encryptAsync, decrypt, decryptAsync, unwrap, unwrapAsync } = require('..');
-const { cipherKeyGen, ecKeyGen, macKeyGen } = require('tr-jwk');
+const { cipherKeyGen, ecKeyGen, macKeyGen, mlKemKeyGen } = require('tr-jwk');
+const { kmac256 } = require('tr-kmac');
 
 const payload = { kukkuu: 'reset' };
 
@@ -140,6 +141,82 @@ function testDir(keyBytes, expectedEnc, compressPayload) {
     assert.equal(ck.k, k.k);
 }
 
+const mlKemPinnedKey = {"priv":"89X6HWRdPGriWTZ6IQZFt9SHF_5aa5k4HQXVC9Pl4WmgerdQsCMPAKTEniqEwOQdne5ghuVMM7iDe0gf2umPsQ","kty":"AKP","alg":"ML-KEM-768","pub":"-TCOsJgLnmSoObhcoUvKPcNGhGMvLlaol6m2ypaCD_SkoLeglSgbRKdmLPQWxcy_CxHNIMfDl7FlOhsAItRxTwwoUkKtCXAkkEyCCLxef8YH48x4HQNfJpeuR9w7MoW776NFGLER0eXFmQUq9lEtKOWPoXR1K8fC8rwxbUp87MnFPnYceMSkuouY-FRW2ASWB0m8eKO_w9d7YRm26AsNQiB3Y3EWhVoJGtGBQuUarSo4-ncnwGIsuUeLckrNQTYiOjsQzdtIk4odECey4dIDH6K0I3Gfe7it5-cbGDOGv7OJXzh4R3djDCCa7MASwGcG7XHCzzcqM-NQh9KotcofiEwxaxSDLZkAkxMo24uTR0YfXEs9ADWTn9Yj5wwp2ZRFagiNpaVa27NQ6dWBcok7tGqkD6tMEmUrFMFV_wUW-Dm-hcG3q2Z8AOSOFxZajst0GnpZmipBKRUOUeBdWMNCg4LPKgYEUVmXcudW1YpoGzY1UCvAcpJ7NOI38Icd2TUXKIEVatqfoBdCmJUqCBfJich_2MeU4fYKG9lrAP3DVPZkPMdOHXV22oUT5Pe8S7uMuchAxOYu9KE4KDYpa1V0E4BmwAxxKxsPcDFUtaDDzYdHCXDJvuMSZEVm6SQRsraWrpmBHmALiqyD1qi91Ayi1YxnERJNkyC8b_NDHQRGLeohvRgeN7kGenMJnpjJF5dtdiIjiuiavGu1ziOpLYIBvQFws5U53wolUvVdktG5t_xie9pMAHNZunCu2sVx5yjKhOOViKK-AVfAEIQa7awtXVWWACMLhtRWdWohNgI1K5mRYtskrmYcmapwA0tgsItYXxhOTPOY_hNAcHhLfNdAIiyz9NsVrrtzh1y9FrVUvUQMKPG5RJe_0KQXj6NQb9BEziXPcoBE2NoWO1kWacAWR0wjmIYAxod-OzOuCnYL6alsSzgegHOyc0cYJAfKK5UKW3SYclMICSnPHOO9zbpjhGiyh6uWbSgEnfAeuiVALVl3RIKv_imt8SqUuojDgOKWoLoUxZK7stlZqwxh_Gphbxi5X3Om0Pgjr0C19RKhtEIFrdClUuWlsImXtLZV58EhqCmIacYExuJXlCF5_cA4abQdH5wWwJK_Xutrs7s2HHpGTaFuffqWk3dX2Gt1_IHJrYrKM7W7WGVi5yEzs0kIYuohH5oRitMkROF88ymCKLSv2fwi4fmRKHlb51wFVOms_AbNujB5GttSs2MreDZs2vCTDXR6x5VwatovCzxxB5RzsyfKisq-abpx5DuFzvLNwuez-lMPZPsSgFESYOU-VnhIUgSYkoOHXAGjt9q3ZZA60Pkm5mkN3zyiYneM0YfMzBVCl5EvFrMPuyK5hIGujfRighFfiFQJLWmFg_QojXhDtsMAljQyWPmKSPY0MvN85Fak_sUKuxdeBIUwwZoa4sUzADFittMLchQj8cmjXpOu-yBesjVQuQwKgeFd9xZdJIp8gFop7ZitTbc4EnmlENMoPlDJ6EhZSmdECziOO6GgBxG3svyyNjKtgWkRb2B8qoPM1MSZaSREOR_laObLHory12CRSglb10OU6XgvB7A"};
+
+const mlKemPinnedToken = (
+    'eyJhbGciOiJNTC1LRU0tNzY4QHNwaW5pdW0uY29tIiwiZW5jIjoiQTI1NkdDTSIsImVrIjoiZTht' +
+    'LWhHYjJTSko5SU9xM0JkQ2J1WUIxMTdKMjVOTm9QVTF6SnA3T3Z6ZzQxa1FWdDF3bE9YYUJybmJD' +
+    'NjFtYzlINDZJV003bFNUYW5DbmVSTU1GVHZDN09fRGpQdm9TMmgxWXpCN2p3TjZxUjZqMTBFSXZR' +
+    'VVZOUGpOcTJ2VUhheW02ckhGU2loU0lnU1FfeWs2VjdFd1pQcS04cEU1OWRTd3lkRmRKck5sbkhU' +
+    'NnNqNUxwUmdKQzJRSnJVTmRKSU9vb2Ric2ZtOV92LWgtTEtJOHk2N3gxbWllREtBcVY5c2VXSlVN' +
+    'dVNSTThYSGE3SGpaTGdZc0xsMk1Ydk9CeHNTcmwtVkh5NFUxWjBwWERXZlpyQVo5RllfNDUxS09K' +
+    'WkJGVHBBMnZtcV83ek8wRVQxNjU5bFdsTVJFbHVTcUFFNGhodGZHS3JYVFEyUXJfM1NvbEFyaW1I' +
+    'MURHb0dMM3Y4dng4ZzMxTVdPMXQ3dXRyY3hQR2l5ODVZWkZxdUkxbGVqVkUxeTl6LWhMR19SV2l3' +
+    'MGNOQkxvNF9ndWN0YTFXSTJKdTktRXozNER0TzczdXJiWHJac3ZrRExfSUJrQ3RKaGxmWGFxUldt' +
+    'cVBqY244WWRZZFhSMUxEVDFQeG1ZZGlURFJiX0kyTlVydU9abHJZT2hMU1FTZ1gzMy1TbkU1UGFv' +
+    'd3hxWEFYcWZRNkpWYk1NMHlYaXVKVmlKYWhEcnRzLU9iUS16bVlqZ0NaOG0yenYzVmVQZkVTYXN1' +
+    'bl9ldS10a0dkb2ZjSVgwOC0yWDdVbjFKeGw0NE5GQkxwY1k4REFGZ0Ffakh5SG5QR2g0d1FKMzVs' +
+    'M1pNSVowMHg0VjlTQjBfWWgyak9aZWhSWDdjZUtJbHZlcktRQk54ZHRhaXJobENJQmtjeVdtMTNl' +
+    'ejR0TjhQc0U4MWM0aFhfTllEb1FqdEc2M3hTMm9yTHBxTEpTbzFkNXlOQmtsWFEzekJrSTRwbkVi' +
+    'SDNaWFBBMkRSSWFJeGJYYzJCM1kxcl9jS0tvdTlJVURHM2NyQi1KWFNWcnVLRlBqd3pNRmFKUFls' +
+    'SXh3NDlKNmp6YkkxT1RTNmNsYnlsWEZBSlFrS1lPQXVaeFQ5Xy14azdvTlgtckhqUnhkTEZtckdo' +
+    'UDQ1ZGR2MnRvTWYtVEx3TktoaTlkYWd4a1RaOGNTYVVnN0kwS3dRbEdlQi1zYUpNTDM0S0hjVFhu' +
+    'cjFSWEdkTzlNWHhMSTNtejRCc09NRmYyMDU5dHViSFpRVkF4ZWdWT1RUeUhQb2RWVm9EaXUwZmJ4' +
+    'by12UnpVOWpZLW9hRHpvcTd5end3Mm1aZlNzSjM2Z0I2MVhYRWhWd0llQ2swejVlVnF5aXhSZElx' +
+    'NU9LT2E1cDNUcnEySzI3eUhUY0FaX2ZDN2lRT0dCN3NMYXlOeE5ERWZ5U2twTExHcjVrYmFxSlZu' +
+    'YTZnNUNVVFAxRDFvZVJSNW43ZUZ4U2pvNVFMSU1ZVk96Z3JCV3FzOHhDcjVQZ3ZrM05mVjRJU0Ny' +
+    'Um5HcFRzamwxTGItaURrR05qSlEwSE42NWU4ai13ZFctVlM5VE1KQVRlbGlpSF9SaGxOSk5hOEwx' +
+    'eWRBR0s0Q0oyWTZtdkVJSWJkbU9aTmlYY2laYk9LSkRFclR0NFNIR0ZPYkU5cUFhdlhuNUpmQ1Zo' +
+    'Umx6cXhudTQ4aW1hTExFUngtWWg3NlVrRHpLMm9IRHZudEpmSHNpeTRXendqcmN5c0ZQVDdIZXd3' +
+    'dnRsdTNzT3BPNzhEbDJwQW5xWE9pYXlNMlNVcVpYT2FSQzl5VUFFalp1VVJjTjBySl93MF9qaHdQ' +
+    'bHE4Z01QaFBJT2w3LWRHNmE0dE9fY1piamJhTXhVVEhwd3JSUVhuaGl2anE3eXJrZTI4X3FQMFJj' +
+    'eFpDc01nV25QREdmUmc4eVVRMkNoVEEifQ..BLlUWTthZKebwY0k.1EGIOCfU6hAHqKJ3aR-ihPo' +
+    'pBGePO5LvqQ._0_PH-wjRqeDlCUyzUnFFw');
+
+const mlKemCtLengths = { 'ML-KEM-512': 768, 'ML-KEM-768': 1088, 'ML-KEM-1024': 1568 };
+const mlKemVariants = Object.keys(mlKemCtLengths);
+
+function testMlKem(variant, compressPayload) {
+    const alg = variant + '@spinium.com';
+    const kp = mlKemKeyGen(variant);
+    const token = encrypt(alg, kp.publicKey, payload, { compressPayload });
+    const parts = token.split('.');
+    const header = parseHeader(token);
+
+    assert.equal(header.alg, alg);
+    assert.equal(header.enc, 'A256GCM');
+    assert.equal(header.zip, expectedZip(compressPayload));
+    assert.equal(parts[1], '');
+    assert.match(header.ek, /^[0-9a-zA-Z_-]+$/);
+    assert.equal(Buffer.from(header.ek, 'base64url').length, mlKemCtLengths[variant]);
+    assert.equal(header.kid, kp.publicKey.kid);
+    assert.deepEqual(decrypt(token, kp.secretKey), payload);
+
+    const ck = unwrap(token, kp.secretKey);
+    verboseOutput(header, token, kp.publicKey, ck, kp.secretKey);
+    assert.deepEqual(decrypt(token, ck), payload);
+    assert.equal(ck.alg, 'A256GCM');
+
+    // The private JWK is acceptable for encryption as well.
+    assert.deepEqual(decrypt(encrypt(alg, kp.secretKey, payload), kp.secretKey), payload);
+
+    // Wrong recipient key fails generically. ML-KEM implicit rejection makes
+    // decapsulation "succeed" with an unrelated shared key, so (as with
+    // ECDH-ES) unwrap returns a wrong CEK and only the GCM tag check fails.
+    const kp2 = mlKemKeyGen(variant);
+    assert.throws(() => decrypt(token, kp2.secretKey), /Unable to decrypt/);
+    assert.throws(() => decrypt(token, unwrap(token, kp2.secretKey)), /Unable to decrypt/);
+
+    // Tampered and truncated KEM ciphertexts fail generically.
+    const headerData = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    for (const badEk of [ (headerData.ek[0] === 'A' ? 'B' : 'A') + headerData.ek.slice(1),
+                          headerData.ek.slice(0, -4) ]) {
+        const badHeader = Buffer.from(JSON.stringify({ ...headerData, ek: badEk })).toString('base64url');
+        const badToken = [ badHeader, ...parts.slice(1) ].join('.');
+        assert.throws(() => decrypt(badToken, kp.secretKey), /Unable to decrypt/);
+    }
+}
+
 [ true, false, 'auto' ].forEach((compressPayload) => {
     [ 'A128GCMKW', 'A192GCMKW', 'A256GCMKW' ].forEach((alg) => testKw(alg, compressPayload));
 
@@ -157,7 +234,37 @@ function testDir(keyBytes, expectedEnc, compressPayload) {
         testRsa(alg, 1024, 'A128GCM', compressPayload);
         testRsa(alg, 2048, 'A256GCM', compressPayload);
     });
+
+    mlKemVariants.forEach((variant) => testMlKem(variant, compressPayload));
 });
+
+// ML-KEM key/algorithm mismatches must throw on encrypt; the unsuffixed
+// draft algorithm names are not implemented.
+(function mlKemRejectsBadKeys() {
+    const kp = mlKemKeyGen('ML-KEM-768');
+    assert.throws(() => encrypt('ML-KEM-512@spinium.com', kp.publicKey, payload), /Invalid JWK key for ML-KEM/);
+    assert.throws(() => encrypt('ML-KEM-768@spinium.com', ecKeyGen('P-256').publicKey, payload), /Invalid JWK key for ML-KEM/);
+    assert.throws(() => encrypt('ML-KEM-768', kp.publicKey, payload), /Invalid encryption algorithm/);
+})();
+
+// The CEK derivation is frozen at draft-ietf-jose-pqc-kem-05 semantics:
+// CEK = KMAC256(sharedKey, AlgorithmID || SuppPubInfo, keydatalen, "") with
+// RFC 7518 section 4.6.2 encodings and the literal alg value as AlgorithmID.
+// Recompute it here from the primitives, independently of jwe.js internals.
+(function mlKemKdfIsDraft05() {
+    const crypto = require('node:crypto');
+    const alg = 'ML-KEM-768@spinium.com';
+    const kp = mlKemKeyGen('ML-KEM-768');
+    const token = encrypt(alg, kp.publicKey, payload);
+    const header = parseHeader(token);
+    const sharedKey = crypto.decapsulate(crypto.createPrivateKey({ key: kp.secretKey, format: 'jwk' }),
+                                         Buffer.from(header.ek, 'base64url'));
+    const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+    const cek = kmac256(sharedKey,
+                        Buffer.concat([ u32(alg.length), Buffer.from(alg, 'ascii'), u32(256) ]),
+                        32);
+    assert.equal(unwrap(token, kp.secretKey).k, cek.toString('base64url'));
+})();
 
 // 'auto' must actually compress when the payload is highly compressible.
 (function autoChoosesCompression() {
@@ -193,6 +300,10 @@ function testDir(keyBytes, expectedEnc, compressPayload) {
         () => {
             const dirKey = { kty: 'oct', k: crypto.randomBytes(32).toString('base64url') };
             return { key: dirKey, alg: 'dir' };
+        },
+        () => {
+            const kp = mlKemKeyGen('ML-KEM-768');
+            return { key: kp.publicKey, alg: 'ML-KEM-768@spinium.com', recovery: kp.secretKey };
         }
     ];
     for (const make of cases) {
@@ -210,6 +321,8 @@ function testDir(keyBytes, expectedEnc, compressPayload) {
         } else if (alg !== 'ECDH-ES' && alg !== 'RSA-OAEP-256') {
             assert.deepEqual(decrypt(r.token, key), payload);
         }
+        assert.equal(r.contentEncryptionKey.k,
+                     unwrap(r.token, recovery ?? key).k);
     }
 })();
 
@@ -268,6 +381,20 @@ async function testAsyncMode(alg, encKey, decKey, compressPayload) {
             const priv = macKeyGen('RS384');
             await testAsyncMode(alg, toPublicJwk(priv), priv, compressPayload);
         }
+        for (const variant of mlKemVariants) {
+            const kp = mlKemKeyGen(variant);
+            await testAsyncMode(variant + '@spinium.com', kp.publicKey, kp.secretKey, compressPayload);
+        }
+    }
+
+    // Pinned ML-KEM decrypt vector. The construction for the @spinium.com
+    // algorithm names is frozen; this token must decrypt identically forever.
+    {
+        assert.deepEqual(decrypt(mlKemPinnedToken, mlKemPinnedKey), { kukkuu: 'reset', n: 42 });
+        assert.deepEqual(await decryptAsync(mlKemPinnedToken, mlKemPinnedKey), { kukkuu: 'reset', n: 42 });
+        assert.equal(unwrap(mlKemPinnedToken, mlKemPinnedKey).alg, 'A256GCM');
+        await assert.rejects(decryptAsync(mlKemPinnedToken, mlKemKeyGen('ML-KEM-768').secretKey),
+                             /Unable to decrypt/);
     }
 
     // 'auto' must compress asynchronously too when it pays off.
