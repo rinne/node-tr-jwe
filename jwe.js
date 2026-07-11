@@ -315,8 +315,11 @@ function _mlKemKdf(alg, keyBits, keyBytes, sharedKey) {
 }
 
 function _isMlKem(t) {
+    // The enc is pinned: the frozen construction always uses the fixed
+    // content encryption of the algorithm (A256GCM), so anything else
+    // in the header is malformed and rejected up front.
     return !! (mlKemAlgOpts[t.headerData?.alg] &&
-               encAlgOpts[t.headerData?.enc] &&
+               (t.headerData?.enc === mlKemAlgOpts[t.headerData?.alg].enc) &&
                (t.key.length === 0) &&
                (typeof t.headerData?.ek === 'string') &&
                /^[0-9a-zA-Z_-]+$/.test(t.headerData.ek));

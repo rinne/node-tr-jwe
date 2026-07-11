@@ -215,6 +215,12 @@ function testMlKem(variant, compressPayload) {
         const badToken = [ badHeader, ...parts.slice(1) ].join('.');
         assert.throws(() => decrypt(badToken, kp.secretKey), /Unable to decrypt/);
     }
+
+    // The enc is pinned to the construction's fixed A256GCM: a token
+    // rewritten to any other enc is rejected (still generically).
+    const badEnc = Buffer.from(JSON.stringify({ ...headerData, enc: 'A128GCM' })).toString('base64url');
+    assert.throws(() => decrypt([ badEnc, ...parts.slice(1) ].join('.'), kp.secretKey),
+                  /Unable to decrypt/);
 }
 
 [ true, false, 'auto' ].forEach((compressPayload) => {

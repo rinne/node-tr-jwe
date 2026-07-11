@@ -119,11 +119,22 @@ direct ML-KEM (FIPS 203) key encapsulation, following
 draft-ietf-jose-pqc-kem-05 in Direct Key Agreement mode.
 
 The algorithm identifiers carry a collision-resistant suffix
-(RFC 7515 section 4.1.1) because the draft is not yet an RFC. **The
+(RFC 7515 section 4.1.1) because the draft was not an RFC. **The
 construction below is frozen for these identifiers**: tokens minted
 with them will decrypt identically forever, regardless of how the
-draft evolves. When the final RFC is published, the registered
-unsuffixed names can be added alongside as separate algorithms.
+standards evolve.
+
+Standards status (July 2026): draft-ietf-jose-pqc-kem-06 removed the
+JOSE/JWE mechanism entirely — the document became COSE-only and moved
+to the COSE working group, and the JOSE working group directed JWE
+post-quantum algorithm registrations to an HPKE-based mechanism
+(draft-skokan-jose-hpke-pq-pqt) instead. Consequently, no registered
+unsuffixed direct-KEM JWE algorithm names are expected: **the suffixed
+identifiers below are the stable, long-term form of this feature**,
+implementing the direct-KEM design as last specified for JOSE in
+draft-05. If standards-based JOSE post-quantum interoperability is
+ever required, HPKE would be added as a separate algorithm family;
+it would not change or replace these identifiers.
 
 Token format (compact serialization):
 
